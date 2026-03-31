@@ -1,0 +1,26 @@
+name: avh
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - ffmpeg
+  - numpy
+  - scipy
+  - pandas
+  - scikit-learn
+  - pytorch
+  - torchvision
+  - torchaudio
+  - opencv
+  - dlib
+  - pip:
+      - omegaconf==2.0.6
+      - hydra-core==1.0.7
+      - tqdm
+      - numba
+      - scikit-video
+      - soundfile
+      - librosa
+
