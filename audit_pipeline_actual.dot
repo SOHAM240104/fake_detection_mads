@@ -1,0 +1,69 @@
+// Actual execution flow: Combined (AVH → optional Grad-CAM → NOMA → fusion)
+// Verified against orchestrator/combined_runner.py, detectors/*, explainability/*, AVH/test_video.py
+// Render: dot -Tpng audit_pipeline_actual.dot -o audit_pipeline_actual.png
+
+digraph combined_pipeline {
+  rankdir=TB;
+  compound=true;
+  node [shape=box, style=rounded];
+
+  subgraph cluster_in {
+    label="Input";
+    video [label="video_path (upload / path)"];
+  }
+
+  subgraph cluster_avh {
+    label="Stage 1: AVH (subprocess in AVH/)";
+    avh_pick [label="run_avh_on_video OR run_avh_unsupervised_on_video\\n(detectors/avh_align.py)"];
+    avh_test [label="AVH/test_video.py OR test_video_unsupervised.py"];
+    preprocess [label="preprocess_video()\\ndlib face + landmarks → mouth ROI 96×96\\noptional smart_spatial_crop (AVH/smart_spatial_crop.py)\\nffmpeg → audio.wav 16kHz mono"];
+    feats [label="extract_avhubert_features() / unsupervised_score()\\nAV-HuBERT visual+audio embeddings"];
+    score_avh [label="Supervised: run_detector()\\nFusionModel forward → logsumexp(-output)\\nUnsupervised: lag/cosine heuristic score"];
+    avh_pick -> avh_test -> preprocess -> feats -> score_avh;
+  }
+
+  video -> avh_pick;
+
+  subgraph cluster_gc {
+    label="Stage 2: Grad-CAM (optional; explainability/gradcam_avh.py → AVH/gradcam_mouth_roi.py)";
+    gc_run [label="run_gradcam_mouth_roi()"];
+    gc_script [label="gradcam_mouth_roi.py\\nHooks: resnet.trunk.layer4\\nscore.backward() from same FusionModel scalar\\nDoes NOT update fusion weights"];
+    gc_xai [label="Optional: temporal_inconsistency, region_tracks,\\nfused_heatmap (explainability/gradcam_avh.py)"];
+    gc_run -> gc_script -> gc_xai;
+  }
+
+  score_avh -> gc_run [style=dashed, label="if run_forensics_cam"];
+
+  subgraph cluster_noma {
+    label="Stage 3: NOMA (detectors/noma.py)";
+    noma_dec [label="decode_audio_to_mono_float32 → 22050 Hz\\n(_decode_audio_to_waveform)"];
+    noma_feat [label="_extract_features_from_array\\n41-D: chroma RMS centroid … MFCC IMFCC"];
+    noma_blk [label="_extract_feature_matrix_from_waveform\\n1s blocks"];
+    noma_svc [label="sklearn pipeline.predict_proba"];
+    noma_cal [label="noma_p_fake_to_calibrated()\\n(calibration_runtime.py, logit temp scaling)"];
+    noma_mean [label="p_noma_mean = mean(p_fake) per block\\n(combined_runner.py)"];
+    noma_dec -> noma_feat -> noma_blk -> noma_svc -> noma_cal -> noma_mean;
+  }
+
+  score_avh -> noma_dec [label="audio_path from AVH temp dir", constraint=false];
+
+  subgraph cluster_fusion {
+    label="Stage 4: Late fusion";
+    p_avh [label="p_avh = avh_score_to_calibrated_p_fake(avh_score)\\n(supervised sigmoid OR unsup mapping)"];
+    fuse [label="compute_reliability_fusion (full)\\nOR compute_simple_late_fusion\\nOR compute_learned_reliability_fusion (learned)"];
+    verdict [label="fusion_verdict: thresholds on p_fused\\n± tau_eff (reliability_fusion.py)"];
+    noma_mean -> p_avh [style=invis];
+    p_avh -> fuse;
+    noma_mean -> fuse;
+    fuse -> verdict;
+  }
+
+  score_avh -> p_avh [style=dotted, label="avh_score JSON"];
+
+  subgraph cluster_side {
+    label="Parallel diagnostics (no score change)";
+    tc [label="compute_temporal_corroboration()\\n(explainability/temporal_corroboration.py)\\nNOMA bins vs saliency — UI only"];
+    gc_xai -> tc;
+    noma_cal -> tc [style=dashed];
+  }
+}
